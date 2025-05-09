@@ -1,134 +1,149 @@
+from fastapi import FastAPI, Request
+import os, requests, json
+from datetime import datetime, timedelta
 
-6542w
-INFO:     54.245.1.154:0 - "POST /square/webhook HTTP/1.1" 200 OK
-6542w
-INFO:     54.245.1.154:0 - "POST /square/webhook HTTP/1.1" 200 OK
-6542w
-INFO:     54.245.1.154:0 - "POST /square/webhook HTTP/1.1" 200 OK
-6542w
-INFO:     54.245.1.154:0 - "POST /square/webhook HTTP/1.1" 200 OK
-     [POST]200square-to-zoho-crm.onrender.com/square/webhookclientIP="54.245.1.154" requestID="c744c4f0-fc24-4f1e" responseTimeMS=1081 responseBytes=235 userAgent="Square Connect v2"
-6542w
-INFO:     54.245.1.154:0 - "POST /square/webhook HTTP/1.1" 200 OK
-     [POST]200square-to-zoho-crm.onrender.com/square/webhookclientIP="54.245.1.154" requestID="0a9457c3-5755-4ec3" responseTimeMS=1002 responseBytes=235 userAgent="Square Connect v2"
-6542w
-INFO:     54.245.1.154:0 - "POST /square/webhook HTTP/1.1" 200 OK
-     [POST]200square-to-zoho-crm.onrender.com/square/webhookclientIP="54.245.1.154" requestID="cf2be4f6-4897-494a" responseTimeMS=1078 responseBytes=235 userAgent="Square Connect v2"
-6542w
-INFO:     54.245.1.154:0 - "POST /square/webhook HTTP/1.1" 200 OK
-     [POST]200square-to-zoho-crm.onrender.com/square/webhookclientIP="54.245.1.154" requestID="8eab5e32-c1b1-4019" responseTimeMS=805 responseBytes=235 userAgent="Square Connect v2"
-6542w
-INFO:     54.245.1.154:0 - "POST /square/webhook HTTP/1.1" 200 OK
-     [POST]200square-to-zoho-crm.onrender.com/square/webhookclientIP="54.245.1.154" requestID="c947c157-ff82-477e" responseTimeMS=1109 responseBytes=235 userAgent="Square Connect v2"
-     [POST]200square-to-zoho-crm.onrender.com/square/webhookclientIP="54.245.1.154" requestID="1c3158dd-6b34-41cb" responseTimeMS=4 responseBytes=227 userAgent="Square Connect v2"
-     [POST]200square-to-zoho-crm.onrender.com/square/webhookclientIP="54.245.1.154" requestID="ff4b4195-e892-4369" responseTimeMS=1845 responseBytes=390 userAgent="Square Connect v2"
-     [POST]200square-to-zoho-crm.onrender.com/square/webhookclientIP="54.245.1.154" requestID="78ba0574-f876-44a2" responseTimeMS=313 responseBytes=227 userAgent="Square Connect v2"
-     [POST]500square-to-zoho-crm.onrender.com/square/webhookclientIP="54.245.1.154" requestID="e21623a4-e15a-4903" responseTimeMS=2090 responseBytes=227 userAgent="Square Connect v2"
-6542w
-INFO:     54.245.1.154:0 - "POST /square/webhook HTTP/1.1" 200 OK
-6542w
-INFO:     54.245.1.154:0 - "POST /square/webhook HTTP/1.1" 200 OK
-6542w
-INFO:     54.245.1.154:0 - "POST /square/webhook HTTP/1.1" 500 Internal Server Error
-6542w
-ERROR:    Exception in ASGI application
-6542w
-Traceback (most recent call last):
-6542w
-  File "/opt/render/project/src/.venv/lib/python3.11/site-packages/uvicorn/protocols/http/h11_impl.py", line 403, in run_asgi
-6542w
-    result = await app(  # type: ignore[func-returns-value]
-6542w
-             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-6542w
-  File "/opt/render/project/src/.venv/lib/python3.11/site-packages/uvicorn/middleware/proxy_headers.py", line 60, in __call__
-6542w
-    return await self.app(scope, receive, send)
-6542w
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-6542w
-  File "/opt/render/project/src/.venv/lib/python3.11/site-packages/fastapi/applications.py", line 1054, in __call__
-6542w
-    await super().__call__(scope, receive, send)
-6542w
-  File "/opt/render/project/src/.venv/lib/python3.11/site-packages/starlette/applications.py", line 112, in __call__
-6542w
-    await self.middleware_stack(scope, receive, send)
-6542w
-  File "/opt/render/project/src/.venv/lib/python3.11/site-packages/starlette/middleware/errors.py", line 187, in __call__
-6542w
-    raise exc
-6542w
-  File "/opt/render/project/src/.venv/lib/python3.11/site-packages/starlette/middleware/errors.py", line 165, in __call__
-6542w
-    await self.app(scope, receive, _send)
-6542w
-  File "/opt/render/project/src/.venv/lib/python3.11/site-packages/starlette/middleware/exceptions.py", line 62, in __call__
-6542w
-    await wrap_app_handling_exceptions(self.app, conn)(scope, receive, send)
-6542w
-  File "/opt/render/project/src/.venv/lib/python3.11/site-packages/starlette/_exception_handler.py", line 53, in wrapped_app
-6542w
-    raise exc
-6542w
-  File "/opt/render/project/src/.venv/lib/python3.11/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
-6542w
-    await app(scope, receive, sender)
-6542w
-  File "/opt/render/project/src/.venv/lib/python3.11/site-packages/starlette/routing.py", line 714, in __call__
-6542w
-    await self.middleware_stack(scope, receive, send)
-6542w
-  File "/opt/render/project/src/.venv/lib/python3.11/site-packages/starlette/routing.py", line 734, in app
-6542w
-    await route.handle(scope, receive, send)
-6542w
-  File "/opt/render/project/src/.venv/lib/python3.11/site-packages/starlette/routing.py", line 288, in handle
-6542w
-    await self.app(scope, receive, send)
-6542w
-  File "/opt/render/project/src/.venv/lib/python3.11/site-packages/starlette/routing.py", line 76, in app
-6542w
-    await wrap_app_handling_exceptions(app, request)(scope, receive, send)
-6542w
-  File "/opt/render/project/src/.venv/lib/python3.11/site-packages/starlette/_exception_handler.py", line 53, in wrapped_app
-6542w
-    raise exc
-6542w
-  File "/opt/render/project/src/.venv/lib/python3.11/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
-6542w
-    await app(scope, receive, sender)
-6542w
-  File "/opt/render/project/src/.venv/lib/python3.11/site-packages/starlette/routing.py", line 73, in app
-6542w
-    response = await f(request)
-6542w
-               ^^^^^^^^^^^^^^^^
-6542w
-  File "/opt/render/project/src/.venv/lib/python3.11/site-packages/fastapi/routing.py", line 301, in app
-6542w
-    raw_response = await run_endpoint_function(
-6542w
-                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-6542w
-  File "/opt/render/project/src/.venv/lib/python3.11/site-packages/fastapi/routing.py", line 212, in run_endpoint_function
-6542w
-    return await dependant.call(**values)
-6542w
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-6542w
-  File "/opt/render/project/src/main.py", line 65, in square_webhook
-6542w
+app = FastAPI()
+
+# ── secrets from Render env ────────────────────────────────────────────────
+ZOHO_CLIENT_ID      = os.getenv("ZOHO_CLIENT_ID")
+ZOHO_CLIENT_SECRET  = os.getenv("ZOHO_CLIENT_SECRET")
+ZOHO_REFRESH_TOKEN  = os.getenv("ZOHO_REFRESH_TOKEN")
+SQUARE_ACCESS_TOKEN = os.getenv("SQUARE_ACCESS_TOKEN", "").strip()
+# ───────────────────────────────────────────────────────────────────────────
+
+# in-memory cache for Zoho access tokens
+ACCESS_TOKEN: str | None = None
+TOKEN_EXPIRY = datetime.utcnow()  # expired so first call refreshes
+
+def zoho_access_token() -> str:
+    global ACCESS_TOKEN, TOKEN_EXPIRY
+    if ACCESS_TOKEN and datetime.utcnow() < TOKEN_EXPIRY:
+        return ACCESS_TOKEN
+
+    resp = requests.post(
+        "https://accounts.zoho.com/oauth/v2/token",
+        data={
+            "refresh_token": ZOHO_REFRESH_TOKEN,
+            "client_id": ZOHO_CLIENT_ID,
+            "client_secret": ZOHO_CLIENT_SECRET,
+            "grant_type": "refresh_token",
+        },
+        timeout=15,
+    ).json()
+
+    if "access_token" not in resp:
+        raise RuntimeError(f"Zoho token error: {resp}")
+
+    ACCESS_TOKEN = resp["access_token"]
+    TOKEN_EXPIRY = datetime.utcnow() + timedelta(minutes=55)  # renew 5 min early
+    return ACCESS_TOKEN
+
+
+def iso_end(start_iso: str, minutes: int) -> str:
+    dt = datetime.strptime(start_iso, "%Y-%m-%dT%H:%M:%SZ")
+    return (dt + timedelta(minutes=minutes)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+@app.get("/oauth/callback")
+def oauth_cb():
+    return {"status": "OK"}
+
+
+@app.post("/square/webhook")
+async def square_webhook(request: Request):
+    body     = await request.json()
+    evt_type = body.get("type")
+
+    if evt_type not in ("booking.created", "booking.updated"):
+        return {"ignored": evt_type}
+
+    booking   = body["data"]["object"]["booking"]
+    square_id = booking["id"]
+    cust_id   = booking.get("customer_id") or booking.get("creator_details", {}).get("customer_id")
+
+    # 1️⃣  Square customer lookup
+    sq_hdr = {"Authorization": f"Bearer {SQUARE_ACCESS_TOKEN}", "Accept": "application/json"}
+    customer = requests.get(
+        f"https://connect.squareup.com/v2/customers/{cust_id}",
+        headers=sq_hdr, timeout=15).json().get("customer", {})
+
+    email = customer.get("email_address")
+    first = customer.get("given_name", "")
+    last  = customer.get("family_name", "") or "Square"
+    phone = customer.get("phone_number", "")
+
+    # 2️⃣  Zoho headers
     zhdr = {"Authorization": f"Zoho-oauthtoken {zoho_access_token()}",
-6542w
-                                                ^^^^^^^^^^^^^^^^^^^
-6542w
-  File "/opt/render/project/src/main.py", line 28, in zoho_access_token
-6542w
-    raise RuntimeError(f"Zoho token error: {r}")
-6542w
-RuntimeError: Zoho token error: {'error_description': 'You have made too many requests continuously. Please try again after some time.', 'error': 'Access Denied', 'status': 'failure'}
-6542w
-INFO:     54.245.1.154:0 - "POST /square/webhook HTTP/1.1" 200 OK
-     ==> Detected service running on port 10000
-     ==> Docs on specifying a port: https://render.com/docs/web-services#port-binding
+            "Content-Type": "application/json"}
+
+    # 3️⃣  find or create Lead
+    lead_id = None
+    if email:
+        srch = requests.get(
+            f"https://www.zohoapis.com/crm/v2/Leads/search?email={email}",
+            headers=zhdr, timeout=15).json()
+        if "data" in srch:
+            lead_id = srch["data"][0]["id"]
+
+    if not lead_id:
+        lead_body = {"data":[{
+            "First_Name": first,
+            "Last_Name" : last,
+            "Email"     : email,
+            "Phone"     : phone,
+            "Lead_Source": "Square"
+        }]}
+        lead_id = requests.post(
+            "https://www.zohoapis.com/crm/v2/Leads",
+            headers=zhdr, data=json.dumps(lead_body), timeout=15
+        ).json()["data"][0]["details"]["id"]
+
+    # 4️⃣  create or update Event
+    evt_search = requests.get(
+        f"https://www.zohoapis.com/crm/v2/Events/search?criteria=(Square_Booking_ID:equals:{square_id})",
+        headers=zhdr, timeout=15).json()
+
+    if evt_type == "booking.created" and "data" not in evt_search:
+        start = booking["start_at"]
+        mins  = booking["appointment_segments"][0].get("duration_minutes", 15)
+        end   = iso_end(start, mins)
+
+        evt_body = {"data":[{
+            "Event_Title"      : f"Square Booking - {first or last}",
+            "Start_DateTime"   : start,
+            "End_DateTime"     : end,
+            "All_day"          : False,
+            "Meeting_Status"   : "Scheduled",
+            "Square_Booking_ID": square_id,
+            "What_Id"          : lead_id,
+            "$se_module"       : "Leads",
+            "Description"      : f"Square booking ID {square_id}"
+        }]}
+        res = requests.post(
+            "https://www.zohoapis.com/crm/v2/Events",
+            headers=zhdr, data=json.dumps(evt_body), timeout=15).json()
+        return {"status": "created", "event": res}
+
+    if evt_type == "booking.updated" and "data" in evt_search:
+        evt_id = evt_search["data"][0]["id"]
+        status = booking.get("status", "ACCEPTED")
+
+        if status == "CANCELED":
+            upd_body = {"data":[{"id": evt_id, "Meeting_Status": "Canceled"}]}
+        else:  # rescheduled
+            start = booking["start_at"]
+            mins  = booking["appointment_segments"][0].get("duration_minutes", 15)
+            end   = iso_end(start, mins)
+            upd_body = {"data":[{
+                "id"             : evt_id,
+                "Start_DateTime" : start,
+                "End_DateTime"   : end,
+                "Meeting_Status" : "Rescheduled"
+            }]}
+
+        res = requests.put(
+            "https://www.zohoapis.com/crm/v2/Events",
+            headers=zhdr, data=json.dumps(upd_body), timeout=15).json()
+        return {"status": "updated", "event": res}
+
+    return {"status": "ignored_or_already_exists"}
