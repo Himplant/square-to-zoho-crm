@@ -1,156 +1,187 @@
-# main.py  – drop-in version
-import os, time, logging, re, random, requests
-from typing import Optional
-from fastapi import FastAPI, Request
+# ---------------------------  main.py  ---------------------------
+import os
+import time
+import hmac
+import json
+import hashlib
+from datetime import datetime, timedelta, timezone
 
-# ---------- ENV ----------
-SQUARE_ACCESS_TOKEN  = os.environ["SQUARE_ACCESS_TOKEN"].strip()
-ZOHO_CLIENT_ID       = os.environ["ZOHO_CLIENT_ID"].strip()
-ZOHO_CLIENT_SECRET   = os.environ["ZOHO_CLIENT_SECRET"].strip()
-ZOHO_REFRESH_TOKEN   = os.environ["ZOHO_REFRESH_TOKEN"].strip()
-ZOHO_FIELD_SQUARE_ID = "Square_Meeting_ID"          # <- change if API-name differs
-# --------------------------
+import requests
+from fastapi import FastAPI, Request, HTTPException, status
 
-SQUARE_API  = "https://connect.squareup.com/v2"
-ZOHO_OAUTH  = "https://accounts.zoho.com/oauth/v2/token"
-ZOHO_API    = "https://www.zohoapis.com/crm/v5"
+# ───────────────────────────────────────────────────────────────────
+#  Environment variables (required in Render → Environment tab)
+# ───────────────────────────────────────────────────────────────────
+SQUARE_ACCESS_TOKEN = os.environ["SQUARE_ACCESS_TOKEN"].strip()
+SQUARE_WEBHOOK_KEY  = os.environ["SQUARE_WEBHOOK_KEY"].strip()
 
-log = logging.getLogger("uvicorn.error")
+ZOHO_CLIENT_ID      = os.environ["ZOHO_CLIENT_ID"].strip()
+ZOHO_CLIENT_SECRET  = os.environ["ZOHO_CLIENT_SECRET"].strip()
+ZOHO_REFRESH_TOKEN  = os.environ["ZOHO_REFRESH_TOKEN"].strip()
+
+# ───────────────────────────────────────────────────────────────────
 app = FastAPI()
 
-@app.get("/")
-@app.head("/")
-def health():
+# Health-check for Render
+@app.get("/", status_code=200)
+def root():
     return {"ok": True}
 
-# ---------- helpers ----------
-_token: tuple[str, float] | None = None
-def zoho_token() -> str:
-    global _token
-    if _token and _token[1] > time.time() + 120:
-        return _token[0]
-    r = requests.post(
-        ZOHO_OAUTH,
-        data=dict(
-            refresh_token = ZOHO_REFRESH_TOKEN,
-            client_id     = ZOHO_CLIENT_ID,
-            client_secret = ZOHO_CLIENT_SECRET,
-            grant_type    = "refresh_token",
-        ),
-        timeout=10,
+# ───────────────────────────────────────────────────────────────────
+#  Utility: get fresh Zoho access-token (cached for 55 min)
+# ───────────────────────────────────────────────────────────────────
+_zoho_cached_token = {"token": None, "exp": 0}
+
+def zoho_access_token() -> str:
+    now = time.time()
+    if _zoho_cached_token["token"] and now < _zoho_cached_token["exp"]:
+        return _zoho_cached_token["token"]
+
+    resp = requests.post(
+        "https://accounts.zoho.com/oauth/v2/token",
+        data={
+            "refresh_token": ZOHO_REFRESH_TOKEN,
+            "client_id":     ZOHO_CLIENT_ID,
+            "client_secret": ZOHO_CLIENT_SECRET,
+            "grant_type":    "refresh_token",
+        },
+        timeout=15,
     ).json()
-    if "access_token" not in r:
-        raise RuntimeError(f"Zoho refresh failed → {r}")
-    _token = (r["access_token"], time.time() + int(r["expires_in"]))
-    return _token[0]
 
-def zh() -> dict[str,str]:
-    return {"Authorization": f"Zoho-oauthtoken {zoho_token()}"}
+    if "access_token" not in resp:
+        raise RuntimeError(f"Zoho token error: {resp}")
 
-def square_headers() -> dict[str,str]:
-    return {
-        "Authorization": f"Bearer {SQUARE_ACCESS_TOKEN}",
-        "Square-Version": "2024-05-15",
-        "Content-Type": "application/json"
-    }
+    _zoho_cached_token["token"] = resp["access_token"]
+    _zoho_cached_token["exp"]   = now + 55 * 60  # 55 minutes
+    return _zoho_cached_token["token"]
 
-PHONE_RE = re.compile(r"[^\d]+")
-def fmt_phone(num: Optional[str]) -> Optional[str]:
-    if not num:
-        return None
-    digits = PHONE_RE.sub("", num)
-    return f"+{digits}"
+# ───────────────────────────────────────────────────────────────────
+#  Square signature verification
+# ───────────────────────────────────────────────────────────────────
+def verify_square_sig(body: bytes, header_sig: str) -> bool:
+    mac = hmac.new(
+        SQUARE_WEBHOOK_KEY.encode(),
+        msg=body,
+        digestmod=hashlib.sha1,
+    ).hexdigest()
+    return hmac.compare_digest(mac, header_sig)
 
-def retry_zoho(req_fn,*a,**k):
-    for attempt in range(5):
-        r = req_fn(*a,**k)
-        if r.status_code != 429:
-            return r
-        delay = (2**attempt) + random.random()
-        log.warning("Zoho 429 – sleeping %.1fs", delay)
-        time.sleep(delay)
-    return r
-
-def search_module(module:str, criteria:str):
-    r = retry_zoho(requests.get, f"{ZOHO_API}/{module}/search",
-                   headers=zh(), params={"criteria":criteria}, timeout=15)
-    r.raise_for_status()
-    return r.json().get("data",[])
-
-def upsert_person(email, phone, first, last, addr):
-    crit_e = f"(Email:equals:{email.lower()})"
-    crit_p = f"(Phone:equals:{PHONE_RE.sub('' , phone or '')})"
-    criteria = f"({crit_e}or{crit_p})" if phone else crit_e
-
-    for mod in ("Leads","Contacts"):
-        res = search_module(mod, criteria)
-        if res:
-            rec = res[0]; rec_id = rec["id"]
-            if addr and not rec.get("Mailing_Street"):
-                patch = {"id": rec_id, **addr}
-                retry_zoho(requests.put, f"{ZOHO_API}/{mod}",
-                           headers=zh(), json={"data":[patch]}, timeout=15)
-            return rec_id, mod
-
-    payload = {"First_Name":first,"Last_Name":last or "(unknown)",
-               "Email":email,"Phone":phone or "",
-               "Lead_Source":"Square", **addr}
-    res = retry_zoho(requests.post, f"{ZOHO_API}/Leads",
-                     headers=zh(), json={"data":[payload]}, timeout=15).json()
-    return res["data"][0]["details"]["id"], "Leads"
-
-def ensure_meeting(rec_id, module, sq_id, title, start_iso, end_iso, status):
-    if search_module("Events", f"({ZOHO_FIELD_SQUARE_ID}:equals:{sq_id})"):
-        return
-    evt = {
-        "Event_Title":     title,
-        "Start_DateTime":  start_iso,
-        "End_DateTime":    end_iso,
-        "Meeting_Status":  status.capitalize(),
-        ZOHO_FIELD_SQUARE_ID: sq_id,
-        "$se_module":      module,
-        "What_Id":         rec_id,
-    }
-    retry_zoho(requests.post, f"{ZOHO_API}/Events",
-               headers=zh(), json={"data":[evt]}, timeout=15)
-# -------------------------------------------------
-
+# ───────────────────────────────────────────────────────────────────
+#  Main webhook
+# ───────────────────────────────────────────────────────────────────
 @app.post("/square/webhook")
 async def square_webhook(request: Request):
-    body = await request.json()
-    if not body.get("type","").startswith("booking."):
-        return {"ignored": body.get("type")}
+    body = await request.body()
+    sig  = request.headers.get("x-square-signature", "")
 
-    b   = body["data"]["object"]["booking"]
-    sq_id   = b["id"]
-    status  = b["status"]
-    start   = b["start_at"]                          # UTC ISO
-    dur     = b["appointment_segments"][0]["duration_minutes"]
-    end_ts  = time.mktime(time.strptime(start,"%Y-%m-%dT%H:%M:%SZ")) + dur*60
-    end_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(end_ts))
+    if not verify_square_sig(body, sig):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,
+                            detail="Invalid Square signature")
 
-    cust = requests.get(f"{SQUARE_API}/customers/{b['customer_id']}",
-                        headers=square_headers(), timeout=10).json()["customer"]
-    email = (cust.get("email_address") or f"{sq_id}@square.noemail").lower()
-    first = cust.get("given_name","")
-    last  = cust.get("family_name","")
-    phone = fmt_phone(cust.get("phone_number"))
+    payload = json.loads(body)
+    event   = payload["type"]
 
-    addr_sq = cust.get("address") or {}
-    addr = {}
-    if addr_sq:
-        addr.update(Mailing_Street=addr_sq.get("address_line_1",""),
-                    Mailing_City  =addr_sq.get("locality",""),
-                    Mailing_State =addr_sq.get("administrative_district_level_1",""),
-                    Mailing_Zip   =addr_sq.get("postal_code",""),
-                    Country       =addr_sq.get("country","US"))
+    # We only care about *booking.created*
+    if event != "booking.created":
+        return {"ignored": event}
 
-    loc = requests.get(f"{SQUARE_API}/locations/{b['location_id']}",
-                       headers=square_headers(), timeout=10).json()["location"]
-    loc_name = loc.get("name","Location")
-    title = f"Himplant virtual consultation – {loc_name} – {first} {last}".strip()
+    booking  = payload["data"]["object"]["booking"]
+    cust_id  = booking["customer_id"]
+    start_at = datetime.fromisoformat(booking["start_at"].replace("Z", "+00:00"))
+    duration = booking["appointment_segments"][0]["duration_minutes"]
+    end_at   = start_at + timedelta(minutes=duration)
 
-    rec_id, module = upsert_person(email, phone, first, last, addr)
-    ensure_meeting(rec_id, module, sq_id, title, start, end_iso, status)
+    # ── Fetch customer details from Square ─────────────────────────
+    cust_resp = requests.get(
+        f"https://connect.squareup.com/v2/customers/{cust_id}",
+        headers={
+            "Authorization": f"Bearer {SQUARE_ACCESS_TOKEN}",
+            "Square-Version": "2024-05-15",
+        },
+        timeout=15,
+    ).json()
 
-    return {"done": True}
+    customer = cust_resp["customer"]
+    first = customer.get("given_name", "")
+    last  = customer.get("family_name", "")
+    email = customer.get("email_address", "")
+    phone = customer.get("phone_number", "")
+    # ensure +countrycode########
+    phone = phone.replace(" ", "").replace("-", "")
+
+    address = customer.get("address", {})
+    street  = address.get("address_line_1", "")
+    city    = address.get("locality", "")
+    state   = address.get("administrative_district_level_1", "")
+    zipc    = address.get("postal_code", "")
+
+    # ── Zoho: upsert Lead / Contact by Email OR Phone ──────────────
+    zhdr = {"Authorization": f"Zoho-oauthtoken {zoho_access_token()}",
+            "Content-Type":  "application/json"}
+
+    lead_id = None
+    for module in ("Leads", "Contacts"):
+        criteria = f"(Email:equals:{email})"
+        if not email:
+            criteria = f"(Phone:equals:{phone})"
+        sr = requests.get(
+            f"https://www.zohoapis.com/crm/v5/{module}/search",
+            headers=zhdr,
+            params={"criteria": criteria},
+            timeout=15,
+        ).json()
+
+        data = sr.get("data", [])
+        if data:
+            lead_id = data[0]["id"]
+            lead_owner = data[0]["Owner"]
+            se_module  = module
+            break
+
+    if not lead_id:
+        create_map = {
+            "First_Name": first,
+            "Last_Name":  last or "(Square)",
+            "Email":      email,
+            "Phone":      phone,
+            "Lead_Source": "Square",
+            "Street": street,
+            "City":   city,
+            "State":  state,
+            "Zip_Code": zipc,
+        }
+        cr = requests.post(
+            "https://www.zohoapis.com/crm/v5/Leads",
+            headers=zhdr,
+            json={"data": [create_map]},
+            timeout=15,
+        ).json()
+        lead_id   = cr["data"][0]["details"]["id"]
+        se_module = "Leads"
+        lead_owner = {"id": cr["data"][0]["details"]["Created_By"]["id"]}
+
+    # ── Build meeting (Event) record ───────────────────────────────
+    location_name = booking.get("location_id", "")
+    title = f"Himplant virtual consultation with {location_name} - {first} {last}"
+
+    evt = {
+        "Event_Title": title,
+        "Start_DateTime": start_at.astimezone(timezone.utc).isoformat(),
+        "End_DateTime":   end_at.astimezone(timezone.utc).isoformat(),
+        "What_Id":        {"id": lead_id},
+        "$se_module":     se_module,
+        "Meeting_Status": "Scheduled",
+        "Booking_status": booking["status"],
+        "Square_Meeting_ID": booking["id"],
+        "All_day": False,
+    }
+
+    requests.post(
+        "https://www.zohoapis.com/crm/v5/Events",
+        headers=zhdr,
+        json={"data": [evt]},
+        timeout=15,
+    )
+
+    return {"status": "created", "lead_id": lead_id}
+# ------------------------------------------------------------------
