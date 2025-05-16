@@ -3,7 +3,6 @@ import requests
 import logging
 from fastapi import FastAPI, Request, Header, HTTPException
 from dotenv import load_dotenv
-from square.utilities.webhooks_helper import is_valid_webhook_event_signature
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
