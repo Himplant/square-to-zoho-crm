@@ -30,7 +30,6 @@ required_env_vars = [
     "SQUARE_WEBHOOK_KEY",
     "SQUARE_ACCESS_TOKEN"
 ]
-
 missing_vars = [var for var in required_env_vars if not os.getenv(var)]
 if missing_vars:
     raise ValueError(f"Missing required environment variables: {', '.join(missing_vars)}")
@@ -42,9 +41,7 @@ def normalize_phone(phone):
     """Normalize phone number to international format."""
     if not phone:
         return ""
-    # Remove all non-digit characters except '+'
     phone = ''.join(c for c in phone if c.isdigit() or c == '+')
-    # Add '+' prefix if not present
     if not phone.startswith('+') and phone:
         phone = '+' + phone
     return phone
@@ -72,7 +69,6 @@ def zoho_access_token():
 def find_lead_or_contact(email, phone, headers):
     """Find existing lead or contact by email or phone."""
     try:
-        # Check Leads by email
         if email:
             lead_url = f"{ZOHO_BASE_URL}/Leads/search?criteria=(Email:equals:{email})"
             lead_resp = requests.get(lead_url, headers=headers)
@@ -81,8 +77,6 @@ def find_lead_or_contact(email, phone, headers):
             if leads:
                 logger.info(f"Found existing lead by email: {email}")
                 return {"module": "Leads", "id": leads[0]["id"]}
-
-        # Check Contacts by email
         if email:
             contact_url = f"{ZOHO_BASE_URL}/Contacts/search?criteria=(Email:equals:{email})"
             contact_resp = requests.get(contact_url, headers=headers)
@@ -91,8 +85,6 @@ def find_lead_or_contact(email, phone, headers):
             if contacts:
                 logger.info(f"Found existing contact by email: {email}")
                 return {"module": "Contacts", "id": contacts[0]["id"]}
-
-        # Check Leads by phone
         if phone:
             lead_url = f"{ZOHO_BASE_URL}/Leads/search?criteria=(Phone:equals:{phone})"
             lead_resp = requests.get(lead_url, headers=headers)
@@ -101,8 +93,6 @@ def find_lead_or_contact(email, phone, headers):
             if leads:
                 logger.info(f"Found existing lead by phone: {phone}")
                 return {"module": "Leads", "id": leads[0]["id"]}
-
-        # Check Contacts by phone
         if phone:
             contact_url = f"{ZOHO_BASE_URL}/Contacts/search?criteria=(Phone:equals:{phone})"
             contact_resp = requests.get(contact_url, headers=headers)
@@ -111,7 +101,6 @@ def find_lead_or_contact(email, phone, headers):
             if contacts:
                 logger.info(f"Found existing contact by phone: {phone}")
                 return {"module": "Contacts", "id": contacts[0]["id"]}
-
         logger.info("No existing lead or contact found")
         return None
     except requests.exceptions.RequestException as e:
@@ -141,7 +130,6 @@ def create_lead(customer_data, headers):
         if "data" not in response:
             logger.error(f"Failed to create lead: {response}")
             raise HTTPException(status_code=500, detail="Failed to create lead in Zoho")
-        
         lead_id = response["data"][0]["details"]["id"]
         logger.info(f"Created new lead with ID: {lead_id}")
         return {"module": "Leads", "id": lead_id}
@@ -158,7 +146,6 @@ def create_event(event_data, headers):
         if "data" not in response:
             logger.error(f"Failed to create event: {response}")
             raise HTTPException(status_code=500, detail="Failed to create event in Zoho")
-        
         logger.info(f"Created new event for {event_data['data'][0]['Who_Id']}")
         return response
     except requests.exceptions.RequestException as e:
@@ -174,18 +161,19 @@ def root():
 async def square_webhook(req: Request, x_square_signature: str = Header(None)):
     """Handle Square webhook events."""
     try:
-        # Get raw body for signature validation
+        # --- DEBUG LOGGING BLOCK ---
         body = await req.body()
         body_str = body.decode('utf-8')
-        
-        # Log the incoming signature for debugging
+        logger.info(f"Headers: {dict(req.headers)}")
+        logger.info(f"Raw body: {body_str}")
+        logger.info(f"SQUARE_WEBHOOK_KEY: {SQUARE_WEBHOOK_KEY}")
+        logger.info(f"WEBHOOK_URL: {WEBHOOK_URL}")
         logger.info(f"Received Square signature: {x_square_signature}")
-        logger.info(f"Webhook URL: {WEBHOOK_URL}")
+        # --- END DEBUG LOGGING BLOCK ---
 
         if not x_square_signature:
             logger.error("No Square signature provided in request")
             raise HTTPException(status_code=401, detail="No Square signature provided")
-
         if not SQUARE_WEBHOOK_KEY:
             logger.error("SQUARE_WEBHOOK_KEY environment variable is not set")
             raise HTTPException(status_code=500, detail="Webhook key not configured")
@@ -197,13 +185,10 @@ async def square_webhook(req: Request, x_square_signature: str = Header(None)):
             SQUARE_WEBHOOK_KEY,
             WEBHOOK_URL
         )
-
         if not is_valid:
             logger.warning(f"Invalid Square webhook signature. Received: {x_square_signature}")
             raise HTTPException(status_code=401, detail="Invalid Square Webhook Key")
-
         logger.info("Webhook signature validated successfully")
-        logger.info(f"Received webhook body: {body_str}")
 
         # Parse JSON body
         try:
@@ -215,7 +200,6 @@ async def square_webhook(req: Request, x_square_signature: str = Header(None)):
         event_type = body_json.get("type")
         booking_id = body_json.get("data", {}).get("id")
         location_id = body_json.get("data", {}).get("object", {}).get("booking", {}).get("location_id")
-
         logger.info(f"Processing event type: {event_type}, booking_id: {booking_id}, location_id: {location_id}")
 
         if event_type not in ["booking.created", "booking.updated"]:
@@ -309,7 +293,6 @@ async def square_webhook(req: Request, x_square_signature: str = Header(None)):
                 "Meeting_Status": "Scheduled"
             }]
         }
-        
         create_event(event_data, zhdr)
         return {"status": "Event created"}
 
