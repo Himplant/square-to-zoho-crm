@@ -4,7 +4,7 @@ import logging
 from fastapi import FastAPI, Request, Header, HTTPException
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
-from square.utilities.webhooks_helper import is_valid_webhook_event_signature
+from squareup.utilities.webhooks_helper import is_valid_webhook_event_signature
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
