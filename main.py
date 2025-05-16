@@ -1,125 +1,143 @@
-import os
-import requests
-import logging
-from fastapi import FastAPI, Request, Header, HTTPException
-from dotenv import load_dotenv
-from square.utilities.webhooks_helper import is_valid_webhook_event_signature
-
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-load_dotenv()
+from fastapi import FastAPI, Request
+import os, requests, json
+from datetime import datetime, timedelta
 
 app = FastAPI()
 
-SQUARE_WEBHOOK_KEY = os.getenv("SQUARE_WEBHOOK_KEY")
-SQUARE_ACCESS_TOKEN = os.getenv("SQUARE_ACCESS_TOKEN")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL", "https://square-to-zoho-crm.onrender.com/square/webhook")
-ZOHO_FLOW_WEBHOOK_URL = "https://flow.zoho.com/766298598/flow/webhook/incoming?zapikey=1001.2779f816150d380c2e7b9833df4a9491.74406660db9786a3d65fde27ba11d305&isdebug=false"
+# ── Render-side env vars you already set ────────────────────────────
+ZOHO_CLIENT_ID      = os.getenv("ZOHO_CLIENT_ID")
+ZOHO_CLIENT_SECRET  = os.getenv("ZOHO_CLIENT_SECRET")
+ZOHO_REFRESH_TOKEN  = os.getenv("ZOHO_REFRESH_TOKEN")
+SQUARE_ACCESS_TOKEN = os.getenv("SQUARE_ACCESS_TOKEN", "").strip()
+# -------------------------------------------------------------------
 
-def normalize_phone(phone):
-    if not phone:
-        return ""
-    phone = ''.join(c for c in phone if c.isdigit() or c == '+')
-    if not phone.startswith('+') and phone:
-        phone = '+' + phone
-    return phone
+ACCESS_TOKEN = None
+TOKEN_EXPIRY = datetime.utcnow()
 
-@app.get("/", status_code=200)
-def root():
-    return {"status": "OK"}
+def zoho_access_token() -> str:
+    """refresh every ~55 min"""
+    global ACCESS_TOKEN, TOKEN_EXPIRY
+    if ACCESS_TOKEN and datetime.utcnow() < TOKEN_EXPIRY:
+        return ACCESS_TOKEN
+
+    r = requests.post(
+        "https://accounts.zoho.com/oauth/v2/token",
+        data={
+            "refresh_token": ZOHO_REFRESH_TOKEN,
+            "client_id":     ZOHO_CLIENT_ID,
+            "client_secret": ZOHO_CLIENT_SECRET,
+            "grant_type":    "refresh_token",
+        },
+        timeout=15,
+    ).json()
+
+    if "access_token" not in r:
+        raise RuntimeError(f"Zoho token error: {r}")
+
+    ACCESS_TOKEN = r["access_token"]
+    TOKEN_EXPIRY = datetime.utcnow() + timedelta(minutes=55)
+    return ACCESS_TOKEN
+
+
+def iso_end(start_iso: str, minutes: int) -> str:
+    dt = datetime.strptime(start_iso, "%Y-%m-%dT%H:%M:%SZ")
+    return (dt + timedelta(minutes=minutes)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
 
 @app.post("/square/webhook")
-async def square_webhook(req: Request, x_square_signature: str = Header(None)):
-    try:
-        body = await req.body()
-        body_str = body.decode('utf-8')
-        logger.info(f"Headers: {dict(req.headers)}")
-        logger.info(f"Raw body: {body_str}")
-        logger.info(f"SQUARE_WEBHOOK_KEY: {SQUARE_WEBHOOK_KEY}")
-        logger.info(f"WEBHOOK_URL: {WEBHOOK_URL}")
-        logger.info(f"Received Square signature: {x_square_signature}")
+async def square_webhook(request: Request):
+    body      = await request.json()
+    evt_type  = body.get("type")
+    if evt_type not in ("booking.created", "booking.updated"):
+        return {"ignored": evt_type}
 
-        if not x_square_signature:
-            logger.error("No Square signature provided in request")
-            raise HTTPException(status_code=401, detail="No Square signature provided")
-        if not SQUARE_WEBHOOK_KEY:
-            logger.error("SQUARE_WEBHOOK_KEY environment variable is not set")
-            raise HTTPException(status_code=500, detail="Webhook key not configured")
+    booking    = body["data"]["object"]["booking"]
+    square_id  = booking["id"]
+    cust_id    = booking["customer_id"]
 
-        is_valid = is_valid_webhook_event_signature(
-            body_str,
-            x_square_signature,
-            SQUARE_WEBHOOK_KEY,
-            WEBHOOK_URL
-        )
-        if not is_valid:
-            logger.warning(f"Invalid Square webhook signature. Received: {x_square_signature}")
-            raise HTTPException(status_code=401, detail="Invalid Square Webhook Key")
-        logger.info("Webhook signature validated successfully")
+    # 1️⃣  Pull full customer profile FIRST
+    sq_hdr = {"Authorization": f"Bearer {SQUARE_ACCESS_TOKEN}", "Accept": "application/json"}
+    cust   = requests.get(f"https://connect.squareup.com/v2/customers/{cust_id}",
+                          headers=sq_hdr, timeout=15).json().get("customer", {})
 
-        try:
-            body_json = await req.json()
-        except Exception as e:
-            logger.error(f"Failed to parse webhook body as JSON: {str(e)}")
-            raise HTTPException(status_code=400, detail="Invalid JSON payload")
+    email = cust.get("email_address") or ""
+    phone = cust.get("phone_number")  or ""
+    first = cust.get("given_name", "")
+    last  = cust.get("family_name", "") or "Square"
 
-        event_type = body_json.get("type")
-        booking_id = body_json.get("data", {}).get("id")
-        logger.info(f"Processing event type: {event_type}, booking_id: {booking_id}")
+    # 2️⃣  Zoho search (Leads then Contacts)
+    zhdr = {"Authorization": f"Zoho-oauthtoken {zoho_access_token()}",
+            "Content-Type": "application/json"}
 
-        if event_type not in ["booking.created", "booking.updated"]:
-            logger.info(f"Ignoring event type: {event_type}")
-            return {"ignored": True}
+    record_id = None
+    module    = None
 
-        # Fetch booking details from Square
-        try:
-            booking_resp = requests.get(
-                f"https://connect.squareup.com/v2/bookings/{booking_id}",
-                headers={"Authorization": f"Bearer {SQUARE_ACCESS_TOKEN}"}
-            )
-            booking_resp.raise_for_status()
-            booking = booking_resp.json().get("booking", {})
-            if not booking:
-                logger.error(f"Booking not found: {booking_id}")
-                raise HTTPException(status_code=404, detail="Booking not found")
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Error fetching booking details: {str(e)}")
-            raise HTTPException(status_code=500, detail=f"Error fetching booking details: {str(e)}")
+    if email:
+        lead = requests.get(
+            f"https://www.zohoapis.com/crm/v2/Leads/search?criteria=(Email:equals:{email})",
+            headers=zhdr, timeout=15).json()
+        if "data" in lead:
+            record_id = lead["data"][0]["id"]
+            module    = "Leads"
 
-        customer_id = booking.get("customer_id")
-        # Fetch customer details from Square
-        try:
-            customer_resp = requests.get(
-                f"https://connect.squareup.com/v2/customers/{customer_id}",
-                headers={"Authorization": f"Bearer {SQUARE_ACCESS_TOKEN}"}
-            )
-            customer_resp.raise_for_status()
-            customer = customer_resp.json().get("customer", {})
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Error fetching customer details: {str(e)}")
-            raise HTTPException(status_code=500, detail=f"Error fetching customer details: {str(e)}")
+        if not record_id:
+            contact = requests.get(
+                f"https://www.zohoapis.com/crm/v2/Contacts/search?criteria=(Email:equals:{email})",
+                headers=zhdr, timeout=15).json()
+            if "data" in contact:
+                record_id = contact["data"][0]["id"]
+                module    = "Contacts"
 
-        # Build enriched payload
-        enriched_payload = {
-            "event_type": event_type,
-            "booking": booking,
-            "customer": customer,
-            "raw_webhook": body_json
+    # 3️⃣  Create Lead if nothing found
+    if not record_id:
+        lead_body = {"data": [{
+            "First_Name": first,
+            "Last_Name" : last,
+            "Email"     : email,
+            "Phone"     : phone,
+            "Lead_Source": "Square"
+        }]}
+        res = requests.post("https://www.zohoapis.com/crm/v2/Leads",
+                            headers=zhdr, data=json.dumps(lead_body), timeout=15).json()
+        record_id = res["data"][0]["details"]["id"]
+        module    = "Leads"
+
+    # 4️⃣  Create or update Event
+    evt_search = requests.get(
+        f"https://www.zohoapis.com/crm/v2/Events/search?"
+        f"criteria=(Square_Booking_ID:equals:{square_id})",
+        headers=zhdr, timeout=15).json()
+
+    start_iso = booking["start_at"]
+    mins      = booking["appointment_segments"][0].get("duration_minutes", 15)
+    end_iso   = iso_end(start_iso, mins)
+
+    if "data" not in evt_search:          # ➟ create new
+        evt_body = {"data": [{
+            "Event_Title"      : f"Square Booking - {first} {last}",
+            "Start_DateTime"   : start_iso,
+            "End_DateTime"     : end_iso,
+            "All_day"          : False,
+            "Meeting_Status"   : "Scheduled",
+            "Square_Booking_ID": square_id,
+            "What_Id"          : record_id,
+            "$se_module"       : module,
+            "Description"      : f"Booking status: {booking['status']}"
+        }]}
+        res = requests.post("https://www.zohoapis.com/crm/v2/Events",
+                            headers=zhdr, data=json.dumps(evt_body), timeout=15).json()
+        return {"created_event": res}
+
+    else:                                 # ➟ update existing
+        evt_id  = evt_search["data"][0]["id"]
+        status  = booking.get("status", "ACCEPTED")
+        updates = {
+            "id"            : evt_id,
+            "Start_DateTime": start_iso,
+            "End_DateTime"  : end_iso,
+            "Meeting_Status": "Canceled" if status == "CANCELED" else "Rescheduled"
         }
+        res = requests.put("https://www.zohoapis.com/crm/v2/Events",
+                           headers=zhdr, data=json.dumps({"data":[updates]}), timeout=15).json()
+        return {"updated_event": res}
 
-        # Forward enriched payload to Zoho Flow
-        try:
-            flow_resp = requests.post(ZOHO_FLOW_WEBHOOK_URL, json=enriched_payload)
-            flow_resp.raise_for_status()
-            logger.info(f"Successfully sent enriched data to Zoho Flow: {flow_resp.text}")
-        except Exception as e:
-            logger.error(f"Failed to send data to Zoho Flow: {str(e)}")
-            raise HTTPException(status_code=500, detail=f"Failed to send data to Zoho Flow: {str(e)}")
-
-        return {"status": "Enriched data sent to Zoho Flow"}
-
-    except Exception as e:
-        logger.error(f"Error processing webhook: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error processing webhook: {str(e)}")
