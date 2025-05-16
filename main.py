@@ -4,6 +4,7 @@ import logging
 from fastapi import FastAPI, Request, Header, HTTPException
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
+from square.utilities.webhooks_helper import is_valid_webhook_event_signature
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -19,6 +20,7 @@ ZOHO_CLIENT_SECRET = os.getenv("ZOHO_CLIENT_SECRET")
 ZOHO_REFRESH_TOKEN = os.getenv("ZOHO_REFRESH_TOKEN")
 SQUARE_WEBHOOK_KEY = os.getenv("SQUARE_WEBHOOK_KEY")
 SQUARE_ACCESS_TOKEN = os.getenv("SQUARE_ACCESS_TOKEN")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL", "https://square-to-zoho-crm.onrender.com/square/webhook")
 
 # Validate required environment variables
 required_env_vars = [
@@ -172,16 +174,49 @@ def root():
 async def square_webhook(req: Request, x_square_signature: str = Header(None)):
     """Handle Square webhook events."""
     try:
-        if x_square_signature != SQUARE_WEBHOOK_KEY:
-            logger.warning("Invalid Square webhook signature")
+        # Get raw body for signature validation
+        body = await req.body()
+        body_str = body.decode('utf-8')
+        
+        # Log the incoming signature for debugging
+        logger.info(f"Received Square signature: {x_square_signature}")
+        logger.info(f"Webhook URL: {WEBHOOK_URL}")
+
+        if not x_square_signature:
+            logger.error("No Square signature provided in request")
+            raise HTTPException(status_code=401, detail="No Square signature provided")
+
+        if not SQUARE_WEBHOOK_KEY:
+            logger.error("SQUARE_WEBHOOK_KEY environment variable is not set")
+            raise HTTPException(status_code=500, detail="Webhook key not configured")
+
+        # Validate the webhook signature using Square's helper
+        is_valid = is_valid_webhook_event_signature(
+            body_str,
+            x_square_signature,
+            SQUARE_WEBHOOK_KEY,
+            WEBHOOK_URL
+        )
+
+        if not is_valid:
+            logger.warning(f"Invalid Square webhook signature. Received: {x_square_signature}")
             raise HTTPException(status_code=401, detail="Invalid Square Webhook Key")
 
-        body = await req.json()
-        logger.info(f"Received webhook: {body}")
-        
-        event_type = body.get("type")
-        booking_id = body.get("data", {}).get("id")
-        location_id = body.get("data", {}).get("object", {}).get("booking", {}).get("location_id")
+        logger.info("Webhook signature validated successfully")
+        logger.info(f"Received webhook body: {body_str}")
+
+        # Parse JSON body
+        try:
+            body_json = await req.json()
+        except Exception as e:
+            logger.error(f"Failed to parse webhook body as JSON: {str(e)}")
+            raise HTTPException(status_code=400, detail="Invalid JSON payload")
+
+        event_type = body_json.get("type")
+        booking_id = body_json.get("data", {}).get("id")
+        location_id = body_json.get("data", {}).get("object", {}).get("booking", {}).get("location_id")
+
+        logger.info(f"Processing event type: {event_type}, booking_id: {booking_id}, location_id: {location_id}")
 
         if event_type not in ["booking.created", "booking.updated"]:
             logger.info(f"Ignoring event type: {event_type}")
