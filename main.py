@@ -4,7 +4,9 @@ import logging
 from fastapi import FastAPI, Request, Header, HTTPException
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
-from squareup.utilities.webhooks_helper import is_valid_webhook_event_signature
+import hmac
+import hashlib
+import base64
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -165,6 +167,15 @@ def create_event(event_data, headers):
     except requests.exceptions.RequestException as e:
         logger.error(f"Error creating event: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error creating event: {str(e)}")
+
+def is_valid_webhook_event_signature(body, signature, signature_key, notification_url):
+    """Validate Square webhook signature (HMAC-SHA1 base64)."""
+    message = notification_url + body
+    key_bytes = bytes(signature_key, 'utf-8')
+    message_bytes = bytes(message, 'utf-8')
+    hmac_code = hmac.new(key_bytes, message_bytes, hashlib.sha1).digest()
+    computed_signature = base64.b64encode(hmac_code).decode()
+    return hmac.compare_digest(computed_signature, signature)
 
 @app.get("/", status_code=200)
 def root():
