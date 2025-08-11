@@ -1,9 +1,32 @@
 services:
   - type: web
-    name: square-zoho-enricher
+    name: square-to-zoho-crm
     env: python
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    autoDeploy: true
     envVars:
       - key: PYTHON_VERSION
-        value: 3.9.0
+        value: 3.10.13
+      - key: SQUARE_ACCESS_TOKEN
+        sync: false
+      - key: SQUARE_WEBHOOK_KEY
+        sync: false
+      - key: WEBHOOK_URL
+        value: https://square-to-zoho-crm.onrender.com/square/webhook
+      - key: ZOHO_CLIENT_ID
+        sync: false
+      - key: ZOHO_CLIENT_SECRET
+        sync: false
+      - key: ZOHO_REFRESH_TOKEN
+        sync: false
+      - key: ZOHO_ACCOUNTS_BASE
+        value: https://accounts.zoho.com
+      - key: ZOHO_CRM_BASE
+        value: https://www.zohoapis.com
+      - key: DEFAULT_PIPELINE
+        value: Default
+      - key: DEFAULT_DEAL_STAGE
+        value: Qualification
+      - key: CANCELED_DEAL_STAGE
+        value: Closed Lost
