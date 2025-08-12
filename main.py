@@ -9,19 +9,19 @@ from typing import Optional, Tuple
 import requests
 from fastapi import FastAPI, Request, HTTPException
 
-# ===== Logging =====
+# ===================== Logging =====================
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(level=getattr(logging, LOG_LEVEL, logging.INFO))
 logger = logging.getLogger("square-zoho-bridge")
 DEBUG_SIGNATURE = os.getenv("DEBUG_SIGNATURE", "0") == "1"
 
-# ===== App =====
+# ===================== App =====================
 app = FastAPI()
 
-# ===== Env =====
+# ===================== Env =====================
 SQUARE_WEBHOOK_KEY   = (os.getenv("SQUARE_WEBHOOK_KEY") or "").strip()
 SQUARE_ACCESS_TOKEN  = (os.getenv("SQUARE_ACCESS_TOKEN") or "").strip()
-WEBHOOK_URL          = (os.getenv("WEBHOOK_URL") or "").strip()  # MUST match Square subscription URL exactly
+WEBHOOK_URL          = (os.getenv("WEBHOOK_URL") or "").strip()  # must equal your Square webhook URL exactly
 
 ZOHO_CLIENT_ID       = (os.getenv("ZOHO_CLIENT_ID") or "").strip()
 ZOHO_CLIENT_SECRET   = (os.getenv("ZOHO_CLIENT_SECRET") or "").strip()
@@ -33,11 +33,10 @@ DEFAULT_PIPELINE     = (os.getenv("DEFAULT_PIPELINE") or "Default").strip()
 DEFAULT_DEAL_STAGE   = (os.getenv("DEFAULT_DEAL_STAGE") or "Qualification").strip()
 CANCELED_DEAL_STAGE  = (os.getenv("CANCELED_DEAL_STAGE") or "Closed Lost").strip()
 
-# API name of your Events custom field (Single Line) used for idempotency
-# Set in Render env if yours differs from this default:
+# API name of your Events custom single-line field (unique) e.g. "Square_Meeting_ID"
 EVENT_EXT_ID_FIELD   = (os.getenv("EVENT_EXT_ID_FIELD") or "Square_Meeting_ID").strip()
 
-# ===== Small helpers =====
+# ===================== Small helpers =====================
 def normalize_phone(phone: Optional[str]) -> str:
     if not phone:
         return ""
@@ -56,8 +55,9 @@ def ensure_end_15min(start_iso: Optional[str]) -> Optional[str]:
 def _safe_tail(s: str, n: int = 6) -> str:
     return s[:6] + "..." + s[-6:] if len(s) > 12 else s
 
-# ===== Signature =====
+# ===================== Signature =====================
 def get_signature_header(req: Request) -> Optional[str]:
+    # Square sends x-square-hmacsha256-signature (new) or x-square-signature (legacy)
     return req.headers.get("x-square-hmacsha256-signature") or req.headers.get("x-square-signature")
 
 def verify_square_signature(raw_body: bytes, provided_sig: str) -> bool:
@@ -81,7 +81,7 @@ def verify_square_signature(raw_body: bytes, provided_sig: str) -> bool:
         logger.info("Sig match: %s", ok)
     return ok
 
-# ===== Zoho auth & API helpers =====
+# ===================== Zoho auth & API helpers =====================
 def zoho_access_token() -> str:
     url = f"{ZOHO_ACCOUNTS_BASE}/oauth/v2/token"
     data = {
@@ -147,14 +147,19 @@ def zoho_create_lead(token: str, first_name: str, last_name: str, email: str, ph
         raise HTTPException(500, "Lead create failed")
     return r.json()["data"][0]["details"]["id"]
 
-# ---- Event upsert via custom unique field ----
+# ---- Event upsert via search -> create/update (works for Events) ----
 def zoho_upsert_event(token: str, who_id: str, subject: str, start_iso: str, end_iso: str,
                       desc: str, booking_id: str):
     """
-    Idempotent upsert: Uses Events/upsert with duplicate_check_fields on your custom
-    unique field (Square_Meeting_ID). Ensures updates don’t create duplicates.
+    Idempotent upsert for Events without using the upsert API:
+    1) Search Events by the unique custom field (EVENT_EXT_ID_FIELD)
+    2) If found -> PUT update
+       Else     -> POST create
     """
-    url = f"{ZOHO_CRM_BASE}/crm/v2/Events/upsert"
+    # 1) Search by your custom unique field (e.g., Square_Meeting_ID)
+    criteria = f"({EVENT_EXT_ID_FIELD}:equals:{booking_id})"
+    existing = zoho_search_module(token, "Events", criteria)
+
     payload = {
         "data": [{
             "Subject": subject,
@@ -163,12 +168,18 @@ def zoho_upsert_event(token: str, who_id: str, subject: str, start_iso: str, end
             "Description": desc,
             "Who_Id": {"id": who_id},
             EVENT_EXT_ID_FIELD: booking_id
-        }],
-        "duplicate_check_fields": [EVENT_EXT_ID_FIELD]
+        }]
     }
-    r = requests.post(url, headers=Z(token), json=payload, timeout=30)
+    url = f"{ZOHO_CRM_BASE}/crm/v2/Events"
+
+    if existing and existing.get("id"):
+        payload["data"][0]["id"] = existing["id"]
+        r = requests.put(url, headers=Z(token), json=payload, timeout=30)
+    else:
+        r = requests.post(url, headers=Z(token), json=payload, timeout=30)
+
     if r.status_code not in (200, 201, 202):
-        logger.error("Event upsert failed: %s %s", r.status_code, r.text)
+        logger.error("Event upsert(create/update) failed: %s %s", r.status_code, r.text)
         raise HTTPException(500, "Event upsert failed")
 
 def zoho_convert_lead(token: str, lead_id: str, deal_name: str):
@@ -206,7 +217,6 @@ def zoho_create_deal_for_contact(token: str, contact_id: str, deal_name: str):
         raise HTTPException(500, "Deal create failed")
 
 def zoho_search_event_by_booking(token: str, booking_id: str) -> Optional[dict]:
-    # Search Events by your custom field (supported), not Subject
     criteria = f"({EVENT_EXT_ID_FIELD}:equals:{booking_id})"
     return zoho_search_module(token, "Events", criteria)
 
@@ -218,13 +228,8 @@ def zoho_mark_event_canceled(token: str, booking_id: str):
     new_subject = ev.get("Subject", "")
     if not new_subject.startswith("[CANCELED]"):
         new_subject = f"[CANCELED] {new_subject or 'Consultation'}"
-    payload = {
-        "data": [{
-            "id": ev["id"],
-            "Subject": new_subject,
-            "Description": (ev.get("Description") or "") + "\nCanceled via Square webhook."
-        }]
-    }
+    payload = {"data": [{"id": ev["id"], "Subject": new_subject,
+                         "Description": (ev.get("Description") or "") + "\nCanceled via Square webhook."}]}
     r = requests.put(url, headers=Z(token), json=payload, timeout=30)
     if r.status_code not in (200, 202):
         logger.warning("Event cancel note failed: %s %s", r.status_code, r.text)
@@ -239,7 +244,7 @@ def zoho_update_deal_stage(token: str, deal_id: str, stage: str):
     if r.status_code not in (200, 202):
         logger.warning("Deal stage update failed: %s %s", r.status_code, r.text)
 
-# ===== Square helpers =====
+# ===================== Square helpers =====================
 def sq_get_booking(booking_id: str) -> dict:
     r = requests.get(
         f"https://connect.squareup.com/v2/bookings/{booking_id}",
@@ -262,7 +267,7 @@ def sq_get_customer(customer_id: str) -> dict:
         raise HTTPException(500, "Square customer fetch failed")
     return r.json().get("customer", {})
 
-# ===== Routes =====
+# ===================== Routes =====================
 @app.get("/")
 def health():
     return {"service": "square→zoho", "status": "ok"}
