@@ -33,6 +33,10 @@ DEFAULT_PIPELINE     = (os.getenv("DEFAULT_PIPELINE") or "Default").strip()
 DEFAULT_DEAL_STAGE   = (os.getenv("DEFAULT_DEAL_STAGE") or "Qualification").strip()
 CANCELED_DEAL_STAGE  = (os.getenv("CANCELED_DEAL_STAGE") or "Closed Lost").strip()
 
+# API name of your Events custom field (Single Line) used for idempotency
+# Set in Render env if yours differs from this default:
+EVENT_EXT_ID_FIELD   = (os.getenv("EVENT_EXT_ID_FIELD") or "Square_Meeting_ID").strip()
+
 # ===== Small helpers =====
 def normalize_phone(phone: Optional[str]) -> str:
     if not phone:
@@ -54,7 +58,6 @@ def _safe_tail(s: str, n: int = 6) -> str:
 
 # ===== Signature =====
 def get_signature_header(req: Request) -> Optional[str]:
-    # Square uses x-square-hmacsha256-signature; support legacy x-square-signature too.
     return req.headers.get("x-square-hmacsha256-signature") or req.headers.get("x-square-signature")
 
 def verify_square_signature(raw_body: bytes, provided_sig: str) -> bool:
@@ -144,9 +147,14 @@ def zoho_create_lead(token: str, first_name: str, last_name: str, email: str, ph
         raise HTTPException(500, "Lead create failed")
     return r.json()["data"][0]["details"]["id"]
 
-def zoho_upsert_event(token: str, who_id: str, subject: str, start_iso: str, end_iso: str, desc: str = ""):
-    existing = zoho_search_module(token, "Events", f"(Subject:equals:{subject})")
-    url = f"{ZOHO_CRM_BASE}/crm/v2/Events"
+# ---- Event upsert via custom unique field ----
+def zoho_upsert_event(token: str, who_id: str, subject: str, start_iso: str, end_iso: str,
+                      desc: str, booking_id: str):
+    """
+    Idempotent upsert: Uses Events/upsert with duplicate_check_fields on your custom
+    unique field (Square_Meeting_ID). Ensures updates don’t create duplicates.
+    """
+    url = f"{ZOHO_CRM_BASE}/crm/v2/Events/upsert"
     payload = {
         "data": [{
             "Subject": subject,
@@ -154,13 +162,11 @@ def zoho_upsert_event(token: str, who_id: str, subject: str, start_iso: str, end
             "End_DateTime": end_iso,
             "Description": desc,
             "Who_Id": {"id": who_id},
-        }]
+            EVENT_EXT_ID_FIELD: booking_id
+        }],
+        "duplicate_check_fields": [EVENT_EXT_ID_FIELD]
     }
-    if existing:
-        payload["data"][0]["id"] = existing["id"]
-        r = requests.put(url, headers=Z(token), json=payload, timeout=30)
-    else:
-        r = requests.post(url, headers=Z(token), json=payload, timeout=30)
+    r = requests.post(url, headers=Z(token), json=payload, timeout=30)
     if r.status_code not in (200, 201, 202):
         logger.error("Event upsert failed: %s %s", r.status_code, r.text)
         raise HTTPException(500, "Event upsert failed")
@@ -199,14 +205,19 @@ def zoho_create_deal_for_contact(token: str, contact_id: str, deal_name: str):
         logger.error("Deal create failed: %s %s", r.status_code, r.text)
         raise HTTPException(500, "Deal create failed")
 
-def zoho_mark_event_canceled(token: str, subject: str):
-    ev = zoho_search_module(token, "Events", f"(Subject:equals:{subject})")
+def zoho_search_event_by_booking(token: str, booking_id: str) -> Optional[dict]:
+    # Search Events by your custom field (supported), not Subject
+    criteria = f"({EVENT_EXT_ID_FIELD}:equals:{booking_id})"
+    return zoho_search_module(token, "Events", criteria)
+
+def zoho_mark_event_canceled(token: str, booking_id: str):
+    ev = zoho_search_event_by_booking(token, booking_id)
     if not ev:
         return
     url = f"{ZOHO_CRM_BASE}/crm/v2/Events"
     new_subject = ev.get("Subject", "")
     if not new_subject.startswith("[CANCELED]"):
-        new_subject = f"[CANCELED] {new_subject or subject}"
+        new_subject = f"[CANCELED] {new_subject or 'Consultation'}"
     payload = {
         "data": [{
             "id": ev["id"],
@@ -276,10 +287,9 @@ async def _handle_square(req: Request):
         return {"ignored": True}
 
     token = zoho_access_token()
-    subject = f"Consultation — Square Booking {booking_id}"
 
     if event_type == "booking.canceled":
-        zoho_mark_event_canceled(token, subject)
+        zoho_mark_event_canceled(token, booking_id)
         deal_name = f"Consultation — {booking_id}"
         deal = zoho_search_deal_by_name(token, deal_name)
         if deal and deal.get("id"):
@@ -299,7 +309,7 @@ async def _handle_square(req: Request):
     start_at = booking.get("start_at")
     end_at = booking.get("end_at") or ensure_end_15min(start_at)
     if not (start_at and end_at):
-        logger.info("Missing start/end; acknowledging test/partial payload.")
+        logger.info("Missing start/end; acknowledging partial payload.")
         return {"ok": True, "note": "partial_payload"}
 
     cust_id = booking.get("customer_id")
@@ -324,8 +334,9 @@ async def _handle_square(req: Request):
     else:
         who_id = person["id"]
 
+    subject = f"Consultation — Square Booking {booking_id}"
     desc = f"Square booking ID: {booking_id}\nEmail: {email}\nPhone: {phone}"
-    zoho_upsert_event(token, who_id, subject, start_at, end_at, desc)
+    zoho_upsert_event(token, who_id, subject, start_at, end_at, desc, booking_id)
 
     deal_name = f"Consultation — {booking_id}"
     if module == "Leads":
