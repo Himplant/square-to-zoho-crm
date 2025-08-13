@@ -28,28 +28,29 @@ ZOHO_REFRESH_TOKEN = os.getenv("ZOHO_REFRESH_TOKEN", "")
 ZOHO_ACCOUNTS_BASE = os.getenv("ZOHO_ACCOUNTS_BASE", "https://accounts.zoho.com")
 ZOHO_CRM_BASE = os.getenv("ZOHO_CRM_BASE", "https://www.zohoapis.com")
 
-# CRM config (already set correctly in your Render env)
-EVENT_MODULE = os.getenv("EVENT_MODULE", "Events")  # Meetings module API-name is "Events"
+# CRM config (kept compatible with your working setup/screenshots)
+EVENT_MODULE = os.getenv("EVENT_MODULE", "Events")                  # Meetings API name
 EVENT_EXT_ID_FIELD = os.getenv("EVENT_EXT_ID_FIELD", "Square_Meeting_ID")
-SUBJECT_FIELD = os.getenv("SUBJECT_FIELD", "Event_Title")  # field for subject/title in Events
-DEFAULT_PIPELINE = os.getenv("DEFAULT_PIPELINE", "Default")
-DEFAULT_DEAL_STAGE = os.getenv("DEFAULT_DEAL_STAGE", "Qualification")
+SUBJECT_FIELD = os.getenv("SUBJECT_FIELD", "Event_Title")           # Meetings subject field
+
+# New defaults per your note (can still be overridden in Render env)
+DEFAULT_PIPELINE = os.getenv("DEFAULT_PIPELINE", "Himplant")
+DEFAULT_DEAL_STAGE = os.getenv("DEFAULT_DEAL_STAGE", "Consultation Scheduled")
 CANCELED_DEAL_STAGE = os.getenv("CANCELED_DEAL_STAGE", "Closed Lost")
+
+# If true, create a Contact when no match is found (and still create a Task for dup review)
+CREATE_CONTACT_IF_NOT_FOUND = os.getenv("CREATE_CONTACT_IF_NOT_FOUND", "true").lower() == "true"
 
 # -----------------------------------------------------------------------------
 # FastAPI
 # -----------------------------------------------------------------------------
 app = FastAPI()
 
-
 # -----------------------------------------------------------------------------
 # Helpers – Square
 # -----------------------------------------------------------------------------
 def is_valid_webhook_event_signature(body: str, signature: str, signature_key: str, notification_url: str) -> bool:
-    """
-    Square signature: base64(hmac_sha1(key, notification_url + body))
-    Doc: https://developer.squareup.com/docs/webhooks/validate-signatures
-    """
+    """Square signature: base64(hmac_sha1(key, notification_url + body))"""
     if not signature or not signature_key or not notification_url:
         return False
     message = (notification_url + body).encode("utf-8")
@@ -59,10 +60,7 @@ def is_valid_webhook_event_signature(body: str, signature: str, signature_key: s
 
 
 def parse_square_booking_id(raw_id: str) -> Tuple[str, Optional[int]]:
-    """
-    Webhooks sometimes carry 'bookingId:version'. Square API wants only bookingId.
-    Returns (base_id, version or None).
-    """
+    """Webhooks may send 'bookingId:version' – API wants only bookingId."""
     if not raw_id:
         return "", None
     parts = str(raw_id).split(":")
@@ -72,31 +70,25 @@ def parse_square_booking_id(raw_id: str) -> Tuple[str, Optional[int]]:
 
 
 def extract_booking_id_from_payload(payload: dict) -> str:
-    """
-    Square webhook shapes vary slightly. Try common spots.
-    """
+    """Try common locations for booking id in webhook payload."""
     data = payload.get("data") or {}
     bid = data.get("id")
     if bid:
         return bid
 
-    # Sometimes nested object contains booking.id
     obj = data.get("object") or {}
     if isinstance(obj, dict):
-        if "booking" in obj and isinstance(obj["booking"], dict) and obj["booking"].get("id"):
-            return obj["booking"]["id"]
+        b = obj.get("booking")
+        if isinstance(b, dict) and b.get("id"):
+            return b["id"]
         if obj.get("id"):
-            return obj.get("id")
+            return obj["id"]
 
-    # Older shapes
-    bid = data.get("object_id")
-    return bid or ""
+    return data.get("object_id") or ""
 
 
 def fetch_square_booking_or_retry(base_booking_id: str) -> requests.Response:
-    """
-    Fetch booking with a tiny backoff because brand-new bookings can 404 briefly.
-    """
+    """Small backoff to avoid immediate 404s on fresh bookings."""
     last = None
     for attempt in range(3):
         r = requests.get(
@@ -108,7 +100,7 @@ def fetch_square_booking_or_retry(base_booking_id: str) -> requests.Response:
             return r
         last = r
         if r.status_code == 404:
-            time.sleep(0.6 + 0.4 * attempt)  # ~0.6s, 1.0s, 1.4s
+            time.sleep(0.6 + 0.4 * attempt)
         else:
             break
     return last
@@ -130,11 +122,7 @@ def normalize_phone(phone: Optional[str]) -> str:
 # -----------------------------------------------------------------------------
 _zoho_token_cache: Dict[str, Any] = {"access_token": None, "expiry": 0}
 
-
 def zoho_token() -> str:
-    """
-    Fetch/refresh Zoho access token using the refresh token.
-    """
     now = int(time.time())
     if _zoho_token_cache["access_token"] and now < _zoho_token_cache["expiry"] - 30:
         return _zoho_token_cache["access_token"]
@@ -172,20 +160,10 @@ def zoho_headers() -> Dict[str, str]:
 # Helpers – Zoho API ops
 # -----------------------------------------------------------------------------
 def zoho_search(module: str, criteria: str) -> Dict[str, Any]:
-    """
-    Zoho search via criteria string.
-    """
     url = f"{ZOHO_CRM_BASE}/crm/v2/{module}/search"
     r = requests.get(url, headers=zoho_headers(), params={"criteria": criteria}, timeout=30)
     if r.status_code == 204:
         return {"data": []}
-    return r.json()
-
-
-def zoho_get(module: str, rec_id: str) -> Dict[str, Any]:
-    url = f"{ZOHO_CRM_BASE}/crm/v2/{module}/{rec_id}"
-    r = requests.get(url, headers=zoho_headers(), timeout=30)
-    r.raise_for_status()
     return r.json()
 
 
@@ -200,10 +178,7 @@ def zoho_update(module: str, rec_id: str, records: Dict[str, Any]) -> requests.R
 
 
 def zoho_upsert_events(record: Dict[str, Any]) -> Tuple[str, bool]:
-    """
-    Create Event (Meetings) and dedupe by external field EVENT_EXT_ID_FIELD.
-    We use duplicate_check_fields to get a 202 + existing id on duplicates.
-    """
+    """Create Event (Meetings) deduped by EVENT_EXT_ID_FIELD."""
     payload = {
         "data": [record],
         "duplicate_check_fields": [EVENT_EXT_ID_FIELD],
@@ -213,17 +188,16 @@ def zoho_upsert_events(record: Dict[str, Any]) -> Tuple[str, bool]:
 
     if r.status_code in (200, 201, 202):
         resp = r.json()
-        details = resp["data"][0].get("details", {})
-        code = resp["data"][0].get("code")
+        node = resp["data"][0]
+        details = node.get("details", {})
+        code = node.get("code")
         if code == "DUPLICATE_DATA":
-            # Zoho returns the existing record id in details.id
             event_id = details.get("id")
             log.info("Zoho %s create OK (duplicate), id=%s", EVENT_MODULE, event_id)
             return event_id, False
-        else:
-            event_id = details.get("id")
-            log.info("Zoho %s create OK, id=%s", EVENT_MODULE, event_id)
-            return event_id, True
+        event_id = details.get("id")
+        log.info("Zoho %s create OK, id=%s", EVENT_MODULE, event_id)
+        return event_id, True
 
     log.error("Zoho %s upsert failed: %s %s", EVENT_MODULE, r.status_code, r.text)
     raise HTTPException(status_code=500, detail="Zoho event upsert failed")
@@ -237,7 +211,6 @@ def zoho_create_deal(record: Dict[str, Any]) -> str:
         deal_id = details.get("id")
         log.info("Zoho Deals create OK, id=%s", deal_id)
         return deal_id
-
     log.error("Zoho Deals create failed: %s %s", r.status_code, r.text)
     raise HTTPException(status_code=500, detail="Zoho deal create failed")
 
@@ -245,9 +218,24 @@ def zoho_create_deal(record: Dict[str, Any]) -> str:
 def zoho_create_task(record: Dict[str, Any]) -> Optional[str]:
     r = zoho_create("Tasks", record)
     if r.status_code in (200, 201):
-        resp = r.json()
-        return resp["data"][0]["details"].get("id")
+        return r.json()["data"][0]["details"].get("id")
     log.warning("Zoho Task create failed: %s %s", r.status_code, r.text)
+    return None
+
+
+def zoho_create_contact(record: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    r = zoho_create("Contacts", record)
+    if r.status_code in (200, 201):
+        node = r.json()["data"][0]
+        if node.get("code") in ("SUCCESS", "SUCCESS_DUPLICATE"):
+            cid = node["details"]["id"]
+            # Fetch to have Owner/structure
+            g = requests.get(f"{ZOHO_CRM_BASE}/crm/v2/Contacts/{cid}", headers=zoho_headers(), timeout=30)
+            if g.status_code == 200:
+                data = (g.json().get("data") or [None])[0]
+                return data
+            return {"id": cid}
+    log.warning("Zoho Contact create failed: %s %s", r.status_code, r.text)
     return None
 
 
@@ -257,23 +245,19 @@ def zoho_create_task(record: Dict[str, Any]) -> Optional[str]:
 def find_contact_by_email(email: str) -> Optional[Dict[str, Any]]:
     if not email:
         return None
-    # Zoho criteria: (Email:equals:address)
     resp = zoho_search("Contacts", f"(Email:equals:{email})")
-    data = resp.get("data") or []
-    return data[0] if data else None
+    return (resp.get("data") or [None])[0]
 
 
 def find_contact_by_phone(phone: str) -> Optional[Dict[str, Any]]:
     if not phone:
         return None
-    # Try both Phone and Mobile fields (normalized)
     resp = zoho_search("Contacts", f"(Phone:equals:{phone})")
     data = resp.get("data") or []
     if data:
         return data[0]
     resp = zoho_search("Contacts", f"(Mobile:equals:{phone})")
-    data = resp.get("data") or []
-    return data[0] if data else None
+    return (resp.get("data") or [None])[0]
 
 
 # -----------------------------------------------------------------------------
@@ -292,7 +276,6 @@ async def square_webhook(req: Request, x_square_signature: str = Header(None)):
     raw_body_bytes = await req.body()
     raw_body = raw_body_bytes.decode("utf-8", errors="ignore")
 
-    # Signature verify
     if not x_square_signature:
         raise HTTPException(status_code=401, detail="Missing Square signature")
     if not SQUARE_WEBHOOK_KEY or not WEBHOOK_URL:
@@ -305,7 +288,6 @@ async def square_webhook(req: Request, x_square_signature: str = Header(None)):
 
     payload = await req.json()
     event_type = payload.get("type")
-    # Only process booking.* events; ignore customer.* etc
     if event_type not in ("booking.created", "booking.updated", "booking.canceled"):
         return {"ignored": True}
 
@@ -313,16 +295,15 @@ async def square_webhook(req: Request, x_square_signature: str = Header(None)):
     base_booking_id, booking_version = parse_square_booking_id(raw_booking_id)
     log.info("Square event=%s booking_id=%s (base=%s, version=%s)", event_type, raw_booking_id, base_booking_id, booking_version)
 
-    # Fetch booking from Square (robust)
+    # Fetch booking
     br = fetch_square_booking_or_retry(base_booking_id)
     if br.status_code != 200:
         log.error("Square booking fetch failed: %s %s", br.status_code, br.text)
         raise HTTPException(status_code=500, detail="Square booking fetch failed")
-
     booking = br.json().get("booking", {})
-    customer_id = booking.get("customer_id")
 
-    # Fetch Customer details (for email/phone/name)
+    # Fetch customer (email/phone/name)
+    customer_id = booking.get("customer_id")
     cust_email = ""
     cust_phone = ""
     first_name = ""
@@ -339,14 +320,12 @@ async def square_webhook(req: Request, x_square_signature: str = Header(None)):
             first_name = cust.get("given_name") or ""
             last_name = cust.get("family_name") or ""
             cust_email = (cust.get("email_address") or "").strip()
-            # Square may store multiple phones; take primary
             phones = cust.get("phone_numbers") or []
             if phones:
                 cust_phone = phones[0].get("phone_number") or ""
         else:
             log.warning("Square customer fetch failed: %s %s", cr.status_code, cr.text)
 
-    # Fallback to booking fields if customer call didn’t return these
     if not first_name or not last_name:
         attendee = (booking.get("attendees") or [{}])[0]
         first_name = first_name or attendee.get("given_name") or ""
@@ -354,20 +333,19 @@ async def square_webhook(req: Request, x_square_signature: str = Header(None)):
         cust_email = cust_email or (attendee.get("email_address") or "")
         cust_phone = cust_phone or (attendee.get("phone_number") or "")
 
-    # Normalize
     email_norm = (cust_email or "").strip().lower()
     phone_norm = normalize_phone(cust_phone)
 
-    # Times & meta for Event/Deal
-    start_at = booking.get("start_at")  # ISO
-    end_at = booking.get("end_at")      # ISO
+    # Build simple service label and times
+    start_at = booking.get("start_at")
+    end_at = booking.get("end_at")
     service_names = []
     for seg in booking.get("appointment_segments") or []:
         service_names.append(seg.get("service_variation_name") or seg.get("service_variation_id") or "Consultation")
     service_label = ", ".join([s for s in service_names if s]) or "Consultation"
 
     # -------------------------------------------------------------------------
-    # Find or prepare Contact
+    # Find or create Contact
     # Priority: email -> phone
     # -------------------------------------------------------------------------
     contact = None
@@ -376,15 +354,24 @@ async def square_webhook(req: Request, x_square_signature: str = Header(None)):
     if not contact and phone_norm:
         contact = find_contact_by_phone(phone_norm)
 
-    owner_id = None
-    contact_id = None
-    if contact:
-        contact_id = contact.get("id")
-        owner = contact.get("Owner") or {}
-        owner_id = owner.get("id")
-        log.info("Matched Contacts id=%s (email=%s phone=%s)", contact_id, email_norm, phone_norm)
-    else:
-        # No match: create Task for human duplicate review
+    created_contact = False
+    if not contact and CREATE_CONTACT_IF_NOT_FOUND:
+        # Create a new contact (and still create a task for dup-review)
+        contact_payload = {
+            "First_Name": first_name or "",
+            "Last_Name": last_name or (email_norm or phone_norm or "Patient"),
+        }
+        if email_norm:
+            contact_payload["Email"] = email_norm
+        if phone_norm:
+            # put into both Phone and Mobile so either field can match later
+            contact_payload["Phone"] = phone_norm
+            contact_payload["Mobile"] = phone_norm
+
+        contact = zoho_create_contact(contact_payload)
+        created_contact = contact is not None
+
+        # Always create a task for ops to review duplicates when we had no match
         subject = f"Review possible duplicate — {first_name} {last_name}".strip()
         desc_lines = [
             f"Square Booking ID: {base_booking_id}",
@@ -392,51 +379,64 @@ async def square_webhook(req: Request, x_square_signature: str = Header(None)):
             f"Email: {email_norm or '—'}",
             f"Phone: {phone_norm or '—'}",
         ]
-        task_payload = {
+        zoho_create_task({
             "Subject": subject,
             "Description": "\n".join(desc_lines),
             "Status": "Not Started",
-            # Optionally put Due_Date, Priority, etc.
-        }
-        zoho_create_task(task_payload)
+        })
+    elif not contact:
+        # If creation disabled (not our case), still leave a task
+        subject = f"Review possible duplicate — {first_name} {last_name}".strip()
+        desc_lines = [
+            f"Square Booking ID: {base_booking_id}",
+            f"Name: {first_name} {last_name}".strip(),
+            f"Email: {email_norm or '—'}",
+            f"Phone: {phone_norm or '—'}",
+        ]
+        zoho_create_task({
+            "Subject": subject,
+            "Description": "\n".join(desc_lines),
+            "Status": "Not Started",
+        })
+
+    owner_id = None
+    contact_id = None
+    if contact:
+        contact_id = contact.get("id")
+        owner = contact.get("Owner") or {}
+        owner_id = owner.get("id")
+        log.info("Matched/Created Contact id=%s (email=%s phone=%s new=%s)", contact_id, email_norm, phone_norm, created_contact)
 
     # -------------------------------------------------------------------------
-    # Upsert Event (Meetings) in Zoho via external unique field
+    # Upsert Meeting (Events module)
     # -------------------------------------------------------------------------
     event_subject = f"{service_label} — Booking {base_booking_id}"
     event_record = {
         SUBJECT_FIELD: event_subject,
-        EVENT_EXT_ID_FIELD: base_booking_id,  # external-id for dedupe
+        EVENT_EXT_ID_FIELD: base_booking_id,
     }
-    # If we have dates, map them
     if start_at:
         event_record["Start_DateTime"] = start_at
     if end_at:
         event_record["End_DateTime"] = end_at
-    # Link Contact if known
     if contact_id:
         event_record["Who_Id"] = {"id": contact_id}
 
-    event_id, created = zoho_upsert_events(event_record)
+    event_id, _ = zoho_upsert_events(event_record)
 
     # -------------------------------------------------------------------------
-    # Create Deal (always), associate to Contact if present, inherit owner
+    # Create Deal (always), associate to Contact, pipeline/stage per defaults
     # -------------------------------------------------------------------------
-    deal_name = f"{first_name} {last_name}".strip() or (email_norm or phone_norm or "Consultation")
-    deal_name = f"{deal_name} — {base_booking_id}"
-
+    deal_name = f"{(first_name + ' ' + last_name).strip() or (email_norm or phone_norm or 'Consultation')} — {base_booking_id}"
     deal_payload = {
         "Deal_Name": deal_name,
         "Pipeline": DEFAULT_PIPELINE,
         "Stage": DEFAULT_DEAL_STAGE,
     }
-    # Link contact (Contact_Name) + inherit owner if available
     if contact_id:
         deal_payload["Contact_Name"] = {"id": contact_id}
     if owner_id:
         deal_payload["Owner"] = {"id": owner_id}
-
-    # Include quick reference fields on Deal if you want them visible
     if email_norm:
         deal_payload["Email"] = email_norm
     if phone_norm:
@@ -444,19 +444,17 @@ async def square_webhook(req: Request, x_square_signature: str = Header(None)):
 
     deal_id = zoho_create_deal(deal_payload)
 
-    # Attach Event to Deal ("Related To" / What_Id) if you want the linkage
+    # Relate Event to Deal
     try:
         zoho_update(EVENT_MODULE, event_id, {"What_Id": {"id": deal_id}})
     except Exception as e:
         log.warning("Could not relate Event to Deal: %s", e)
 
-    # -------------------------------------------------------------------------
-    # If booking was canceled, move deal to your canceled stage
-    # -------------------------------------------------------------------------
+    # Move deal to canceled stage if booking canceled
     if event_type == "booking.canceled":
         try:
             zoho_update("Deals", deal_id, {"Stage": CANCELED_DEAL_STAGE})
         except Exception as e:
             log.warning("Failed to move deal to canceled stage: %s", e)
 
-    return {"ok": True, "event_id": event_id, "deal_id": deal_id}
+    return {"ok": True, "event_id": event_id, "deal_id": deal_id, "contact_id": contact_id}
